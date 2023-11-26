@@ -1,0 +1,17 @@
+dataset:
+  name: 'dtu'
+  image_root_dir: dtu
+  fov: 90
+  rot: 45
+  resolution: 512
+  crop_size: 512
+  seed: 0
+train:
+  lr: 0.0002
+model:
+  model_type: dtu
+  guidance_scale: 9.
+  model_id: ./stable-diffusion-2-inpainting
+  single_image_ft: False
+  diff_timestep: 50
+    

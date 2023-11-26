@@ -1,0 +1,27 @@
+dataset:
+  name: 'dtu'
+  num_views: 12
+  image_dir: dtu
+  resolution_h: 192
+  resolution_w: 256
+  data_load_mode: fix_frame
+  test_interval: -1
+  gen_data_ratio: 0.5 # Training data ratio of text-conditioned generation or dual-conditioned generation
+train:
+  lr: 0.000001
+
+model:
+  model_id: stabilityai/stable-diffusion-2-depth #../input1/models--stabilityai--stable-diffusion-2-base
+  depth_config: configs/depth_preprocessor_config.json
+  guidance_scale: 9.
+  diff_timestep: 50
+  model_type: image_dreamer
+  overlap_filter: 0.3
+  place_holder: "*"
+  # This is a place holder for the config file to be valid
+  initial_word: "a set of multi-view photo of {}"
+  single_image_ft: False
+
+
+
+    
