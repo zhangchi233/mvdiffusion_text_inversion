@@ -16,11 +16,12 @@ import sys
 sys.path.append('/workspace')
 import os
 os.chdir("/workspace")
+print(os.getcwd())
 from CasMVSNet_pl.models.mvsnet import CascadeMVSNet
 from CasMVSNet_pl.models.mvsnet import CascadeMVSNet
 from CasMVSNet_pl.utils import load_ckpt
 from CasMVSNet_pl.utils import * 
-
+from einops import rearrange
 from torchvision import transforms as T
 import matplotlib.pyplot as plt
 from inplace_abn import ABN
@@ -30,7 +31,7 @@ def decode_batch(batch):
     imgs = batch['images']
     proj_mats = batch['proj_mats']
     depths = batch['depths']
-    masks = batch['masks']
+    masks = batch['mask']
     init_depth_min = batch['init_depth_min'].item()
     depth_interval = batch['depth_interval'].item()
     return imgs, proj_mats, init_depth_min, depth_interval
@@ -60,6 +61,12 @@ def normalize_depth(x):
         x = (255*x)
        
         return x
+depth_model = CascadeMVSNet(n_depths=[8,32,48],
+                      interval_ratios=[1.0,2.0,4.0],
+                      num_groups=1,
+                      norm_act=ABN).cuda()
+load_ckpt(depth_model, '/workspace/CasMVSNet_pl/ckpts/_ckpt_epoch_10.ckpt')
+#depth_model.eval()
 def plot_depths(batch,results,depths,path = "./"):
     
     fig, axs = plt.subplots(4, 3, figsize=(10, 10))
@@ -69,7 +76,7 @@ def plot_depths(batch,results,depths,path = "./"):
     depth_impaired =  impaired_result["depth_0"]
     
     images,mask_images,images_pred = batch
-    images_pred.to(images.dtype)
+
 
     axs[0,0].imshow(visualize_depth(gt_result['depth_0'][0]).permute(1,2,0))
     axs[0,0].set_title("gt_depth")
@@ -79,45 +86,95 @@ def plot_depths(batch,results,depths,path = "./"):
     axs[0,2].set_title("impaired_depth")
 
     #unpreprocess = normalize_depth
-    
-    axs[1,0].imshow(unpreprocess(images[0][0].cpu()).permute(1,2,0).detach().numpy())
+        
+    axs[1,0].imshow(unpreprocess(images[0][0]).permute(1,2,0))
     axs[1,0].set_title("image 1")
-    axs[1,1].imshow(unpreprocess(images[0][1].cpu()).permute(1,2,0).detach().numpy())
+    axs[1,1].imshow(unpreprocess(images[0][1]).permute(1,2,0))
     axs[1,1].set_title("image 2")
-    axs[1,2].imshow(unpreprocess(images[0][2].cpu()).permute(1,2,0).detach().numpy())
+    axs[1,2].imshow(unpreprocess(images[0][2]).permute(1,2,0))
     axs[1,2].set_title("image 3")
-    axs[2,0].imshow(unpreprocess(mask_images[0][0].cpu()).permute(1,2,0).cpu().detach().numpy())
+    axs[2,0].imshow(unpreprocess(mask_images[0][0]).permute(1,2,0).cpu().detach().numpy())
     axs[2,0].set_title("mask image 1")
-    axs[2,1].imshow(unpreprocess(mask_images[0][1].cpu()).permute(1,2,0).cpu().detach().numpy())
+    axs[2,1].imshow(unpreprocess(mask_images[0][1]).permute(1,2,0).cpu().detach().numpy())
     axs[2,1].set_title("mask image 2")
-    axs[2,2].imshow(unpreprocess(mask_images[0][2].cpu()).permute(1,2,0).cpu().detach().numpy())
+    axs[2,2].imshow(unpreprocess(mask_images[0][2]).permute(1,2,0).cpu().detach().numpy())
     axs[2,2].set_title("mask image 3")
-    axs[3,0].imshow(unpreprocess(images_pred[0][0].cpu()).permute(1,2,0).cpu().detach().numpy())
+    axs[3,0].imshow(unpreprocess(images_pred[0][0]).permute(1,2,0).cpu().detach().numpy())
     axs[3,0].set_title("predicted image 1")
-    axs[3,1].imshow(unpreprocess(images_pred[0][1].cpu()).permute(1,2,0).cpu().detach().numpy())
+    axs[3,1].imshow(unpreprocess(images_pred[0][1]).permute(1,2,0).cpu().detach().numpy())
     axs[3,1].set_title("predicted image 2")
-    axs[3,2].imshow(unpreprocess(images_pred[0][2].cpu()).permute(1,2,0).cpu().detach().numpy())
+    axs[3,2].imshow(unpreprocess(images_pred[0][2]).permute(1,2,0).cpu().detach().numpy())
     axs[3,2].set_title("predicted image 3")
-    os.makedirs(path, exist_ok=True)
+
     img_dir1 = os.path.join(path,"depths_prediction.png")
     img_dir2 = os.path.join(path,"observed_dephts.png")
 
     plt.savefig(img_dir1)
     plt.close()
-    plt.imshow(visualize_depth(depths[0]).permute(1,2,0).cpu().detach().numpy(), alpha=0.5)
+    plt.imshow(visualize_depth(depths[0]).permute(1,2,0), alpha=0.5)
     
     plt.savefig(img_dir2)
     plt.close()
+
 class PanoOutpaint(PanoOutpaintGenerator):
     def __init__(self, depth_model,plot_depths,**kwargs):
         super().__init__( **kwargs)
         self.depth_model = depth_model
         self.plot_depths = plot_depths
+        self.criterion =  torch.nn.SmoothL1Loss(reduction='mean')
+        self.trainable_params = [(list(self.text_encoder.parameters()),1.0)]
+     
+    
+
+
+
+    def gen_cls_free_guide_pair(self, latents, timestep, prompt_embd, batch):
+
+
+        R = [batch['R']]
+        K = [batch['K']]
+
+        meta = {
+            'K': K,
+            'R': R,
+            'homographys': batch["homographys"],
+            "use_corres": batch["use_corres"]
+        }
+
+        return latents, timestep, prompt_embd, meta
+
+   
+    def forward_cls_free(self, latents_high_res, _timestep, prompt_embd, batch, model):
+        latents, _timestep, _prompt_embd, meta = self.gen_cls_free_guide_pair(
+            latents_high_res, _timestep, prompt_embd, batch)
+        #print(latents.shape)
+        noise_pred = model(
+            latents, _timestep, _prompt_embd, meta)
+
+        noise_pred_text = noise_pred.chunk(2)
+       
+
+        return noise_pred
+    def encode_text(self, text, device):
+        text_inputs = self.tokenizer(
+            text, padding="max_length", max_length=self.tokenizer.model_max_length,
+            truncation=True, return_tensors="pt"
+        )
+        text_input_ids = text_inputs.input_ids
+        if hasattr(self.text_encoder.config, "use_attention_mask") and self.text_encoder.config.use_attention_mask:
+            attention_mask = text_inputs.attention_mask.cuda()
+        else:
+            attention_mask = None
+        prompt_embeds = self.text_encoder(
+            text_input_ids.to(device), attention_mask=attention_mask)
+
+        return prompt_embeds[0].float(), prompt_embeds[1]
     def decode_latent(self,latents,vae,transformation = False):
         b, m = latents.shape[0:2]
         latents = (1 / vae.config.scaling_factor * latents)
 
         images = []
+        #with torch.no_grad():
         for j in range(m):
             image = vae.decode(latents[:, j]).sample
             images.append(image)
@@ -131,19 +188,13 @@ class PanoOutpaint(PanoOutpaintGenerator):
             image = transformation(image)
             print("transformed image shape is:",image.shape)
         return image
+    
     def training_step(self,batch,batch_idx):
-        batch["dark_imgs"] =batch["dark_imgs"].cuda().to(self.vae.dtype)
-        batch["imgs"] = batch["imgs"].cuda().to(self.vae.dtype)
-        batch["R"] = batch["R"].cuda().to(self.vae.dtype)
-        batch["K"]= batch["K"].cuda().to(self.vae.dtype)
-        batch["use_corres"] =False
-        batch["homographys"] = batch["homographys"].cuda().float().to(self.vae.dtype)
-
         depth_model=self.depth_model
         plot_depths=self.plot_depths
         images = batch["images"]
-        mask_images = batch["dark_imgs"].cuda()
-
+        mask_images = batch["dark_imgs"]#.cuda()
+        mask = batch["mask"].float()
         bs, m, _,h, w = images.shape
         #images=rearrange(images, 'bs m h w c -> bs m c h w')
         #mask_images=rearrange(mask_images, 'bs m h w c -> bs m c h w')
@@ -163,58 +214,62 @@ class PanoOutpaint(PanoOutpaintGenerator):
             print(prompt)
             prompt_embds.append(self.encode_text(
                 prompt, device)[0])
-        prompt_embds = torch.stack(prompt_embds, dim=1)
+        prompt_embd = torch.stack(prompt_embds, dim=1)
 
-        prompt_null = self.encode_text('', device)[0]
-        prompt_embd = torch.cat(
-            [prompt_null[:, None].repeat(1, m, 1, 1), prompt_embds])
-
+        #prompt_null = self.encode_text('', device)[0]
+        #prompt_embd = torch.cat(
+        #    [prompt_null[:, None].repeat(1, m, 1, 1), prompt_embds])
+        print("prompt_embd require grad is:",prompt_embd.requires_grad)
+        
         self.scheduler.set_timesteps(self.diff_timestep, device=device)
         timesteps = self.scheduler.timesteps
+        
 
 
         for i, t in enumerate(timesteps):
             _timestep = torch.cat([t[None, None]]*m, dim=1)
-            #print(latents.shape,mask_latnets.shape,masked_image_latents.shape)
+                #print(latents.shape,mask_latnets.shape,masked_image_latents.shape)
             latent_model_input = torch.cat([latents, mask_latnets, masked_image_latents], dim=2)
 
             noise_pred = self.forward_cls_free(
-                latent_model_input, _timestep, prompt_embd, batch, self.mv_base_model)
+                    latent_model_input, _timestep, prompt_embd, batch, self.mv_base_model)
 
             latents = self.scheduler.step(
-                noise_pred, t, latents).prev_sample
-
+                    noise_pred, t, latents).prev_sample
+        print("latents require grad is:",latents.requires_grad)
         images_pred = self.decode_latent(
-            latents, self.vae,transformation = True)
+                latents, self.vae,transformation = True)
+        print("images_pred require grad is:",images_pred.requires_grad)
         
-        print(images_pred.shape)
         images, proj_mats, init_depth_min, depth_interval = decode_batch(batch)
+        images = images.cuda()
+        images.requires_grad = True
+        loss = self.criterion(images_pred.float(),images.float())
+        print("loss is : ",loss,loss.requires_grad,images.requires_grad)
+        return loss
         gt_result = depth_model(images.cuda(), proj_mats.cuda(), init_depth_min, depth_interval)
+        print(images_pred.shape,images_pred.requires_grad,images.requires_grad)
         
 
         impaired_result = depth_model(mask_images.cuda(), proj_mats.cuda(), init_depth_min, depth_interval)
        
 
         pred_result = depth_model(images_pred, proj_mats.cuda(), init_depth_min, depth_interval)
-        
-        results = gt_result,impaired_result,pred_result
-        
-        batch_images = images,mask_images,images_pred 
-        
-
-        
-
-
         depth_pred =  pred_result["depth_0"]
         depth_gt =  gt_result["depth_0"]
         depth_impaired =  impaired_result["depth_0"]
-        loss = torch.nn.functional.mse_loss(depth_pred,depth_gt)
-        print("loss is : ",loss)
+        
+        
+       
+        results = gt_result,impaired_result,pred_result
+        
+        batch_images = images,mask_images,images_pred 
         plot_depths(batch_images,results,batch["depths"])
 
-       
-
         return loss
+    
+
+
     @torch.no_grad()
     def inference(self,batch):
         images = batch["dark_imgs"]
@@ -261,16 +316,11 @@ class PanoOutpaint(PanoOutpaintGenerator):
         images_pred = self.decode_latent(
             latents, self.vae,transformation = True)
         return images_pred
-    @torch.no_grad()
+
+
+
     def validation_step(self, batch, batch_idx):
         
-        batch["dark_imgs"] =batch["dark_imgs"].cuda().to(self.vae.dtype)
-        batch["imgs"] = batch["imgs"].cuda().to(self.vae.dtype)
-        batch["R"] = batch["R"].cuda().to(self.vae.dtype)
-        batch["K"]= batch["K"].cuda().to(self.vae.dtype)
-        batch["use_corres"] =False
-        batch["homographys"] = batch["homographys"].cuda().float().to(self.vae.dtype)
-
         depth_model=self.depth_model
         plot_depths=self.plot_depths
         images_pred = self.inference(batch)
@@ -293,15 +343,16 @@ class PanoOutpaint(PanoOutpaintGenerator):
         pred_result = depth_model(images_pred, proj_mats.cuda(), init_depth_min, depth_interval)
         
         results = gt_result,impaired_result,pred_result
-        batch_images = images,mask_images,images_pred 
+
         try:
             img_dir = os.path.join(self.logger.log_dir, 'images')
-            plot_depths(batch_images,results,depths,path=img_dir)
         except:
             
             img_dir = os.path.join("./", 'validation_step_images')
-            plot_depths(batch_images,results,depths,path=img_dir)
-  
+
+        
+        batch_images = images,mask_images,images_pred 
+        plot_depths(batch_images,results,depths,path=img_dir)
         images = ((batch['images']/2+0.5)
                           * 255).cpu().numpy().astype(np.uint8)
         images_pred = ((images_pred.permute(0,1,3,4,2)/2+0.5)
@@ -315,62 +366,51 @@ class PanoOutpaint(PanoOutpaintGenerator):
                 self.save_image(images_pred, images, batch['prompt'], batch_idx)
         except:
             print("not bound to logger and trainer")
-if __name__=="__main__":
-    import pytorch_lightning as pl
-    from pytorch_lightning.callbacks import ModelCheckpoint
-    from pytorch_lightning.loggers import TensorBoardLogger
-    from pytorch_lightning import Trainer
-    depth_model = CascadeMVSNet(n_depths=[8,32,48],
-                      interval_ratios=[1.0,2.0,4.0],
-                      num_groups=1,
-                      norm_act=ABN).cuda()
-    load_ckpt(depth_model, '/workspace/CasMVSNet_pl/ckpts/_ckpt_epoch_10.ckpt')
-    depth_model.eval()
+if __name__ =="__main__":
     dataset = DTU(root_dir = "/workspace/dtu",split = "train",len = 1)
     config = yaml.load(open("/workspace/test.yaml", 'rb'), Loader=yaml.SafeLoader)
     model = PanoOutpaint(config = config,depth_model=depth_model,plot_depths=plot_depths)
-    model.load_state_dict(torch.load("/workspace/weights/pano_outpaint.ckpt",
+    model.load_state_dict(torch.load("./weights/pano_outpaint.ckpt",
                                     map_location='cpu')['state_dict'], strict=False)
+    model = model.to("cuda")
+    from torch.nn import MSELoss
+from torch.utils.data import DataLoader
+from torch.optim import Adam
+train_loader = DataLoader(dataset,batch_size = 1)
 
+optimizer = Adam(model.trainable_params[0][0], lr=1e-4)
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+for i in range(200):
 
-
-
-
-    train_loader = DataLoader(dataset,batch_size = 1)
-    model = model.cuda()
-
-
-    args = argparse.Namespace(
-    decives=1,
-    num_nodes=1,
-    accelerator='ddp',
-    max_epochs=100,
-    log_every_n_steps=100,
-    num_sanity_val_steps=1,
-    limit_val_batches=1,
-    benchmark=True,
-    check_val_every_n_epoch=10,
-    )
-
-    checkpoint_callback = ModelCheckpoint(save_top_k=1, monitor="train_loss",
-                                      mode="min", save_last=1,
-                                      filename='epoch={epoch}-loss={train_loss:.4f}')
-
-    logger = TensorBoardLogger(
-        save_dir='./tf_dir', name="experiment_trainer", default_hp_metric=False)
-
-    # Create the trainer from args
-    trainer = pl.Trainer(
-        devices=1,
-        num_nodes=1,
+    for data in train_loader:
+        optimizer.zero_grad()
+        data["dark_imgs"] =data["dark_imgs"].cuda()
+        data["imgs"] = data["imgs"].cuda()
+        data["R"] = data["R"].cuda()
+        data["K"]= data["K"].cuda()
+        data["use_corres"]=False
+        data["homographys"] = data["homographys"].float().cuda()
+        #data["images"] = data["dark_imgs"].cuda()
+        print(data.keys())
         
-        accelerator = "cuda",
-        max_epochs=args.max_epochs,
-        log_every_n_steps=args.log_every_n_steps,
-        num_sanity_val_steps=args.num_sanity_val_steps,
-        limit_val_batches=args.limit_val_batches,
-        benchmark=args.benchmark,
-        check_val_every_n_epoch=args.check_val_every_n_epoch,
-        callbacks=[checkpoint_callback],
-        logger=logger)
-    trainer.fit(model, train_loader, train_loader)
+        
+        #image_pred = model.inference(data)
+        
+        #print(image_pred.shape)
+
+        #plt.imshow(image_pred[0][0])
+        #plt.show()
+
+
+
+        #unprocess = T.Normalize(mean=[-0.485/0.229, -0.456/0.224, -0.406/0.225], 
+            #                                std=[1/0.229, 1/0.224, 1/0.225])
+        
+            
+        loss = model.training_step(data,0)
+        print(loss,loss.requires_grad)
+        loss.backward()
+
+        optimizer.step()
+        print("now step is:",i)
+        model.validation_step(data,0)

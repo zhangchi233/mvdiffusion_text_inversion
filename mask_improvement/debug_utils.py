@@ -1,8 +1,8 @@
 import os
-os.chdir("/input0")
+os.chdir("/workspace")
 print(os.getcwd())
 import sys
-sys.path.append("/input0")
+sys.path.append("/workspace")
 from CasMVSNet_pl.datasets import DTUDataset
 from CasMVSNet_pl.datasets.utils import read_pfm
 import cv2
@@ -127,7 +127,7 @@ class DTU(DTUDataset):
 
     def build_metas(self):
         self.metas = []
-        with open(f'/openbayes/input/input0/CasMVSNet_pl/datasets/lists/dtu/{self.split}.txt') as f:
+        with open(f'/workspace/CasMVSNet_pl/datasets/lists/dtu/{self.split}.txt') as f:
             self.scans = [line.rstrip() for line in f.readlines()]
 
         # light conditions 0-6 for training
@@ -210,6 +210,9 @@ class DTU(DTUDataset):
         Ks = []
         dark_images = []
         proj_mats = []
+        masks = []
+
+
         for i, vid in enumerate(view_ids):
             # NOTE that the id in image file names is from 1 to 49 (not 0~48)
             if self.img_wh is None:
@@ -250,11 +253,11 @@ class DTU(DTUDataset):
                 prompt = f.readline().strip()+" in van goth sytled"
                 prompts.append(prompt)
 
-
+            masks.append(self.read_mask(mask_filename))
             if i == 0:  # reference view
                 sample['init_depth_min'] = torch.FloatTensor([depth_min])
                 if self.img_wh is None:
-                    sample['masks'] = self.read_mask(mask_filename)
+                    #sample['masks'] = self.read_mask(mask_filename)
                     sample['depths'] = self.read_depth(depth_filename)
                 ref_proj_inv = torch.inverse(proj_mat_ls)
             else:
@@ -724,7 +727,7 @@ class PanoOutpaintGenerator(pl.LightningModule):
         return {'optimizer': optimizer, 'lr_scheduler': scheduler}
 
     def prepare_mask_latents(
-        self, mask, masked_image, batch_size, height, width
+        self, mask, masked_image, height, width
     ):
 
         mask = torch.nn.functional.interpolate(
@@ -795,7 +798,7 @@ class PanoOutpaintGenerator(pl.LightningModule):
 
         return latents, timestep, prompt_embd, meta
 
-    @torch.no_grad()
+   
     def forward_cls_free(self, latents_high_res, _timestep, prompt_embd, batch, model):
         latents, _timestep, _prompt_embd, meta = self.gen_cls_free_guide_pair(
             latents_high_res, _timestep, prompt_embd, batch)
@@ -837,7 +840,7 @@ class PanoOutpaintGenerator(pl.LightningModule):
             _mask, _masked_image_latent = self.prepare_mask_latents(
                 mask[:,i],
                 masked_image[:,i],
-                bs,
+                #bs,
                 h,
                 w,
             )
